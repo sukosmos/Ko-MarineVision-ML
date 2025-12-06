@@ -2,8 +2,6 @@ data/
 *.jsonl
 *.json
 *.jpg
-*.png
 *.pt
 __pycache__/
-outputs/
 train/

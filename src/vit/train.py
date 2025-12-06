@@ -3,6 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 import torch.nn.functional as F
+from pathlib import Path
 
 from build_data import EnvDataset
 from model import ViTEnvClassifier
@@ -36,4 +37,9 @@ for epoch in range(10):
 
     print(f"epoch {epoch}: loss={loss.item():.4f}")
 
-torch.save(model.state_dict(), "outputs/vit/checkpoints/vit_env.pth")
+# 체크포인트 디렉토리 생성
+checkpoint_path = Path("outputs/vit/checkpoints")
+checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+torch.save(model.state_dict(), checkpoint_path / "vit_env.pth")
+print(f"Model saved to {checkpoint_path / 'vit_env.pth'}")

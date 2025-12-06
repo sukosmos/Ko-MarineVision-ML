@@ -9,7 +9,7 @@ from model import ViTEnvClassifier
 
 device = "cuda"
 
-train_ds = EnvDataset("../../dataset/train")
+train_ds = EnvDataset("../../dataset/test")
 train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
 
 model = ViTEnvClassifier().to(device)

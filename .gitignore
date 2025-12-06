@@ -6,3 +6,4 @@ data/
 *.pt
 __pycache__/
 outputs/
+train/

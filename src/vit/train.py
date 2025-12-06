@@ -19,7 +19,7 @@ for epoch in range(5):
     model.train()
     for pixels, labels in train_loader:
         pixels = pixels.to(device)
-        labels = {k: torch.tensor(v).to(device) for k, v in labels.items()}
+        labels = {k: v.to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device) for k, v in labels.items()}
 
         preds = model(pixels)
 

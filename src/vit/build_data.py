@@ -21,6 +21,11 @@ class EnvDataset(Dataset):
 
         # 대응되는 JSON 파일 찾기
         relative = img_path.relative_to(self.root_dir / "image")
+        # VS_* -> VL_* 변환
+        parts = list(relative.parts)
+        if parts[0].startswith("VS_"):
+            parts[0] = "VL_" + parts[0][3:]
+        relative = Path(*parts)
         json_path = self.label_root / relative.with_suffix(".json")
 
         img = Image.open(img_path).convert("RGB")
@@ -32,11 +37,12 @@ class EnvDataset(Dataset):
 
         pixel_values = processor(img, return_tensors="pt")["pixel_values"].squeeze(0)
 
+        # 레이블 값이 1부터 시작하므로 0-based index로 변환
         labels = {
-            "season": env["season"],
-            "night": env["night"],
-            "weather": env["weather"],
-            "wave": env["wave"],
+            "season": env["season"] - 1,
+            "night": env["night"] - 1,
+            "weather": env["weather"] - 1,
+            "wave": env["wave"] - 1,
         }
 
         return pixel_values, labels

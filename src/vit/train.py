@@ -15,7 +15,7 @@ train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
 model = ViTEnvClassifier().to(device)
 optimizer = AdamW(model.parameters(), lr=2e-5)
 
-for epoch in range(5):
+for epoch in range(10):
     model.train()
     for pixels, labels in train_loader:
         pixels = pixels.to(device)

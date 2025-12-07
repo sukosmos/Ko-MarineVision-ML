@@ -3,5 +3,8 @@ data/
 *.json
 *.jpg
 *.pt
+*.pth
 __pycache__/
 train/
+outputs/
+checkpoints/

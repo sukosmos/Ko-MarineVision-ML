@@ -1,64 +1,111 @@
 # src/build_dataset.py
 import json
+from pathlib import Path
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
 import torchvision.transforms as T
 
-class CaptionDataset(Dataset):
+
+class MultiModalCaptionDataset(Dataset):
     """
-    ExpansionNet v2 학습용 Dataset
-    - bbox format: (w, h, x, y)
-    - caption: string
-    - image: raw image
+    Dataset folder structure:
+    root_dir/
+        image/VS_XXXX/xxx.jpg
+        label/VL_XXXX/xxx.json
     """
 
-    def __init__(self, jsonl_path, img_root, tokenizer, max_len=64):
-        self.data = [json.loads(l) for l in open(jsonl_path, "r")]
-        self.img_root = img_root
+    def __init__(self, root_dir, tokenizer, max_len=64):
+        self.root_dir = Path(root_dir)
+
+        self.image_root = self.root_dir / "image"
+        self.label_root = self.root_dir / "label"
+
         self.tokenizer = tokenizer
         self.max_len = max_len
 
+        # 모든 이미지 파일 검색
+        self.image_paths = sorted(self.image_root.rglob("*.jpg"))
+
         self.tf = T.Compose([
-            T.Resize((224, 224)),   # ExpansionNet v2 default
+            T.Resize((224, 224)),
             T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406],
-                        std=[0.229, 0.224, 0.225])
+            T.Normalize([0.485, 0.456, 0.406],
+                        [0.229, 0.224, 0.225])
         ])
 
     def __len__(self):
-        return len(self.data)
+        return len(self.image_paths)
 
     def __getitem__(self, idx):
-        item = self.data[idx]
+        img_path = self.image_paths[idx]
 
-        # ----- Load Image -----
-        img_path = f"{self.img_root}/{item['image']['filename']}"
+        # -----------------------------------------------------
+        # 1) JSON 파일 위치 계산 (VS → VL 변환)
+        # -----------------------------------------------------
+        relative = img_path.relative_to(self.image_root)   # ex: VS_EO_SU_DT/img001.jpg
+        parts = list(relative.parts)
+
+        # VS → VL 변환
+        if parts[0].startswith("VS_"):
+            parts[0] = "VL_" + parts[0][3:]  # VS_EO_SU_DT → VL_EO_SU_DT
+
+        json_path = self.label_root / Path(*parts).with_suffix(".json")
+
+        if not json_path.exists():
+            raise FileNotFoundError(f"Label not found for {img_path} → {json_path}")
+
+        # -----------------------------------------------------
+        # 2) 이미지 로드
+        # -----------------------------------------------------
         image = Image.open(img_path).convert("RGB")
         image = self.tf(image)
 
-        # ----- Caption -----
-        caption = item["caption"]
-        tokenized = self.tokenizer(
-            caption,
-            max_length=self.max_len,
+        # -----------------------------------------------------
+        # 3) JSON 로드
+        # -----------------------------------------------------
+        with open(json_path, "r") as f:
+            data = json.load(f)
+
+        # caption
+        encoded = self.tokenizer(
+            data["caption"],
             padding="max_length",
             truncation=True,
+            max_length=self.max_len,
             return_tensors="pt"
         )
 
-        # ---- BBoxes (w, h, x, y) ----
-        # 그대로 반환 (ExpansionNetv2에서 필요시 feature로 사용)
-        bboxes = []
-        for obj in item.get("annotations", []):
-            w, h, x, y = obj["bounding_box"]  # ⚠ bbox format: w h x y
-            bboxes.append([w, h, x, y])
+        # -----------------------------------------------------
+        # 4) Environment (season, night, weather, wave)
+        # -----------------------------------------------------
+        env = torch.tensor([
+            data["env"]["season"],
+            data["env"]["night"],
+            data["env"]["weather"],
+            data["env"]["wave"]
+        ], dtype=torch.float32)
 
-        bboxes = torch.tensor(bboxes, dtype=torch.float32) if bboxes else torch.zeros((0, 4))
+        # -----------------------------------------------------
+        # 5) Object list (bbox = w, h, x, y)
+        # -----------------------------------------------------
+        objs = []
+        for ann in data["annotations"]:
+            w, h, x, y = ann["bounding_box"]  # ⚠ 너의 규칙 그대로 사용
+            objs.append([
+                ann["class"],
+                ann["sub_class"],
+                w, h, x, y
+            ])
+
+        objects = torch.tensor(objs, dtype=torch.float32)
 
         return {
             "image": image,
-            "caption_ids": tokenized["input_ids"].squeeze(0),
-            "attention_mask": tokenized["attention_mask"].squeeze(0),
-            "bboxes": bboxes
+            "caption_ids": encoded["input_ids"].squeeze(0),
+            "attention_mask": encoded["attention_mask"].squeeze(0),
+            "env": env,
+            "objects": objects,
+            "img_path": str(img_path),
+            "json_path": str(json_path)
         }

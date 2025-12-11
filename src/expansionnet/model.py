@@ -3,44 +3,117 @@ import torch
 import torch.nn as nn
 from transformers import AutoTokenizer
 
-# 예시: ExpansionNet v2 임의 구조 (실제 구조에 맞게 수정 가능)
-class ExpansionNetV2(nn.Module):
-    def __init__(self, vocab_size, embed_dim=512):
+
+def load_tokenizer():
+    """Load or create a tokenizer for Korean text"""
+    tokenizer = AutoTokenizer.from_pretrained("klue/roberta-base")
+    return tokenizer
+
+
+# ------------------------------
+# 1. Object Embedding Module
+# ------------------------------
+class ObjectFeatureEncoder(nn.Module):
+    def __init__(self, num_classes, num_subclasses, embed_dim):
+        super().__init__()
+        self.class_emb = nn.Embedding(num_classes, embed_dim)
+        self.subclass_emb = nn.Embedding(num_subclasses, embed_dim)
+        self.bbox_fc = nn.Linear(4, embed_dim)   # bbox: (w,h,x,y)
+
+        self.proj = nn.Linear(embed_dim * 3, embed_dim)
+
+    def forward(self, obj_tensor):
+        """
+        obj_tensor: (N_obj, 6)
+            [class_id, subclass_id, w, h, x, y]
+        """
+        cls = self.class_emb(obj_tensor[:, 0].long())
+        sub = self.subclass_emb(obj_tensor[:, 1].long())
+        bbox = self.bbox_fc(obj_tensor[:, 2:].float())
+
+        x = torch.cat([cls, sub, bbox], dim=-1)
+        return self.proj(x)  # (N_obj, embed_dim)
+
+
+# ------------------------------
+# 2. Env Feature Encoder (season, night, weather, wave)
+# ------------------------------
+class EnvEncoder(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.fc = nn.Linear(4, embed_dim)  # 4 env values
+
+    def forward(self, env_vec):
+        return self.fc(env_vec.float()).unsqueeze(1)  # (B, 1, D)
+
+
+# ------------------------------
+# 3. Expansion Layers (핵심 구조)
+# ------------------------------
+class ExpansionLayer(nn.Module):
+    def __init__(self, embed_dim, expand=4):
+        super().__init__()
+        self.fc1 = nn.Linear(embed_dim, embed_dim * expand)
+        self.fc2 = nn.Linear(embed_dim * expand, embed_dim)
+        self.act = nn.ReLU()
+
+    def forward(self, x):
+        return self.fc2(self.act(self.fc1(x)))
+
+
+# ------------------------------
+# 4. Full ExpansionNetv2 (Encoder + Decoder)
+# ------------------------------
+class ExpansionNetV2_Multimodal(nn.Module):
+    def __init__(self, vocab_size, num_classes, num_subclasses, embed_dim=512):
         super().__init__()
 
-        self.encoder_cnn = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1),
+        # 1) image encoder
+        self.cnn = nn.Sequential(
+            nn.Conv2d(3, 64, 3, stride=2, padding=1),
             nn.ReLU(),
-            nn.Flatten()
+            nn.Conv2d(64, 128, 3, stride=2, padding=1),
+            nn.ReLU()
         )
+        self.img_proj = nn.Linear(128 * 56 * 56, embed_dim)
 
-        self.enc_linear = nn.Linear(64 * 112 * 112, embed_dim)
+        # 2) object & env encoder
+        self.obj_encoder = ObjectFeatureEncoder(num_classes, num_subclasses, embed_dim)
+        self.env_encoder = EnvEncoder(embed_dim)
 
-        self.decoder = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(d_model=embed_dim, nhead=8),
-            num_layers=4
+        # 3) expansion (visual feature richness 증가)
+        self.expand = ExpansionLayer(embed_dim)
+
+        # 4) transformer decoder
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=embed_dim, nhead=8, batch_first=True
         )
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=4)
 
+        # 5) vocab embedding & output head
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.output = nn.Linear(embed_dim, vocab_size)
 
-    def forward(self, img, tgt_ids, tgt_mask):
-        # image → feature
-        img_feat = self.encoder_cnn(img)
-        img_feat = self.enc_linear(img_feat).unsqueeze(0)  # (1, B, D)
+    def encode_image(self, img):
+        feat = self.cnn(img)
+        feat = feat.reshape(feat.size(0), -1)
+        feat = self.img_proj(feat)
+        feat = self.expand(feat)
+        return feat.unsqueeze(1)  # (B, 1, D)
 
-        # caption → tokens → embedding
-        tgt_embed = self.embedding(tgt_ids).transpose(0, 1)  # (T, B, D)
+    def forward(self, img, obj_tensor, env_vec, tgt_ids, tgt_mask):
+        B = img.size(0)
 
-        # Transformer decoding
-        dec_out = self.decoder(tgt_embed, memory=img_feat, tgt_mask=tgt_mask)
+        img_feat = self.encode_image(img)
+        obj_feat = self.obj_encoder(obj_tensor)  # (N_obj, D)
+        obj_feat = obj_feat.unsqueeze(0).repeat(B, 1, 1)
 
-        logits = self.output(dec_out)  # (T, B, vocab)
+        env_feat = self.env_encoder(env_vec)
 
-        return logits.transpose(0, 1)  # (B, T, vocab)
+        encoder_memory = torch.cat([img_feat, obj_feat, env_feat], dim=1)
 
+        tgt_embed = self.embedding(tgt_ids)
 
-def load_tokenizer():
-    # BERT tokenizer or GPT tokenizer 등 원하는 것을 사용하면 됨
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-multilingual-cased")
-    return tokenizer
+        dec_out = self.decoder(tgt_embed, encoder_memory, tgt_mask=tgt_mask)
+
+        return self.output(dec_out)

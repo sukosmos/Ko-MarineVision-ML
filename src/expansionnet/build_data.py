@@ -78,12 +78,13 @@ class MultiModalCaptionDataset(Dataset):
 
         # -----------------------------------------------------
         # 4) Environment (season, night, weather, wave)
+        # 0-based 인덱싱으로 변환하지 않고 그대로 사용 (EnvEncoder에서 Linear로 처리)
         # -----------------------------------------------------
         env = torch.tensor([
-            data["env"]["season"],
-            data["env"]["night"],
-            data["env"]["weather"],
-            data["env"]["wave"]
+            data["env"]["season"] - 1,   # 1~2 -> 0~1
+            data["env"]["night"] - 1,    # 1~2 -> 0~1
+            data["env"]["weather"] - 1,  # 1~7 -> 0~6
+            data["env"]["wave"] - 1      # 1~7 -> 0~6
         ], dtype=torch.float32)
 
         # -----------------------------------------------------
@@ -91,10 +92,11 @@ class MultiModalCaptionDataset(Dataset):
         # -----------------------------------------------------
         objs = []
         for ann in data["annotations"]:
-            w, h, x, y = ann["bounding_box"]  # ⚠ 너의 규칙 그대로 사용
+            w, h, x, y = ann["bounding_box"]
+            # PyTorch Embedding은 0-based 인덱싱을 사용하므로 1을 빼줌
             objs.append([
-                ann["class"],
-                ann["sub_class"],
+                ann["class"] - 1,      # 1~4 -> 0~3
+                ann["sub_class"] - 1,  # 1~42 -> 0~41
                 w, h, x, y
             ])
 

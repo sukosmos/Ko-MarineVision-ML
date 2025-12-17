@@ -7,7 +7,7 @@ import sys
 
 from build_data import MultiModalCaptionDataset
 from model import ExpansionNetV2_Multimodal, load_tokenizer
-
+from train_improved_2 import ExpansionNetV2_WithDropout
 
 def collate_fn(batch):
     """객체 개수가 다른 샘플들을 배치로 묶기"""
@@ -149,10 +149,11 @@ def test(max_samples=None):
     loader = DataLoader(test_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
     # Model
-    model = ExpansionNetV2_Multimodal(
+    model = ExpansionNetV2_WithDropout(
         vocab_size=tokenizer.vocab_size,
         num_classes=4,
-        num_subclasses=42
+        num_subclasses=42,
+        dropout=0.15
     ).to(device)
 
     # Load checkpoint

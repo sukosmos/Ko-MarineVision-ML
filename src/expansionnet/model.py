@@ -6,7 +6,7 @@ from transformers import AutoTokenizer, ViTModel, AutoModel
 
 def load_tokenizer():
     """Load or create a tokenizer for Korean text"""
-    tokenizer = AutoTokenizer.from_pretrained("klue/roberta-base")
+    tokenizer = AutoTokenizer.from_pretrained("klue/roberta-base", local_files_only=True)
     return tokenizer
 
 
@@ -33,10 +33,13 @@ class ObjectFeatureEncoder(nn.Module):
         
         self.proj = nn.Linear(embed_dim * 4, embed_dim)  # DINO + class + subclass + bbox
 
-    def forward(self, obj_tensor, obj_images=None):
+    def forward(self, obj_tensor, full_images=None):
         """
         obj_tensor: (B, N_obj, 6) [class_id, subclass_id, w, h, x, y]
-        obj_images: (B, N_obj, 3, H, W) cropped object images (optional)
+        full_images: (B, 3, H, W) full scene images
+        
+        bbox format: [w, h, x, y] - normalized [0, 1]
+        DINO는 bbox 영역을 crop해서 사용
         """
         B, N_obj = obj_tensor.shape[:2]
         
@@ -44,18 +47,73 @@ class ObjectFeatureEncoder(nn.Module):
         sub = self.subclass_emb(obj_tensor[:, :, 1].long())
         bbox = self.bbox_fc(obj_tensor[:, :, 2:].float())
         
-        # If object crops provided, use DINO features
-        if obj_images is not None:
+        # Extract DINO features from bbox regions
+        if full_images is not None:
+            # Crop objects from full image using bbox
+            obj_crops = self._crop_objects(full_images, obj_tensor[:, :, 2:6])
+            
             with torch.no_grad():
-                dino_feats = self.dino(obj_images.view(-1, 3, 224, 224))
+                # obj_crops: (B*N_obj, 3, 224, 224)
+                dino_feats = self.dino(obj_crops)
+            
             dino_feats = dino_feats.view(B, N_obj, -1)
             dino_feats = self.dino_proj(dino_feats)
         else:
-            # Use zero features if no crops
-            dino_feats = torch.zeros(B, N_obj, cls.size(-1), device=cls.device)
+            # Fallback: use metadata only
+            dino_feats = torch.zeros(B, N_obj, self.dino_proj.out_features, device=cls.device)
         
         x = torch.cat([dino_feats, cls, sub, bbox], dim=-1)
         return self.proj(x)  # (B, N_obj, embed_dim)
+    
+    def _crop_objects(self, images, bboxes):
+        """
+        Crop object regions from images using bboxes
+        images: (B, 3, H, W)
+        bboxes: (B, N_obj, 4) [w, h, x, y] normalized
+        Returns: (B*N_obj, 3, 224, 224)
+        """
+        B, N_obj = bboxes.shape[:2]
+        _, _, H, W = images.shape
+        
+        crops = []
+        for b in range(B):
+            for n in range(N_obj):
+                w_norm, h_norm, x_norm, y_norm = bboxes[b, n]
+                
+                # Skip padding objects (all zeros)
+                if w_norm == 0 and h_norm == 0:
+                    # Use center crop as fallback
+                    crops.append(torch.nn.functional.interpolate(
+                        images[b:b+1, :, H//4:3*H//4, W//4:3*W//4],
+                        size=(224, 224), mode='bilinear', align_corners=False
+                    ))
+                    continue
+                
+                # Convert normalized coords to pixel coords
+                x1 = int((x_norm - w_norm/2) * W)
+                y1 = int((y_norm - h_norm/2) * H)
+                x2 = int((x_norm + w_norm/2) * W)
+                y2 = int((y_norm + h_norm/2) * H)
+                
+                # Clamp to image bounds
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(W, x2), min(H, y2)
+                
+                # Crop and resize to 224x224
+                if x2 > x1 and y2 > y1:
+                    crop = images[b:b+1, :, y1:y2, x1:x2]
+                    crop = torch.nn.functional.interpolate(
+                        crop, size=(224, 224), mode='bilinear', align_corners=False
+                    )
+                else:
+                    # Fallback if bbox is invalid
+                    crop = torch.nn.functional.interpolate(
+                        images[b:b+1], size=(224, 224), mode='bilinear', align_corners=False
+                    )
+                
+                crops.append(crop)
+        
+        return torch.cat(crops, dim=0)  # (B*N_obj, 3, 224, 224)
 
 
 # ------------------------------
@@ -92,7 +150,7 @@ class ExpansionNetV2_Multimodal(nn.Module):
         super().__init__()
         
         # 1) ViT image encoder (global scene understanding)
-        self.vit = ViTModel.from_pretrained("google/vit-base-patch16-224")
+        self.vit = ViTModel.from_pretrained("google/vit-base-patch16-224", local_files_only=True)
         vit_dim = 768  # ViT-base hidden size
         
         # 2) object & env encoder (with DINO)
@@ -120,14 +178,14 @@ class ExpansionNetV2_Multimodal(nn.Module):
         feat = self.expand(feat)
         return feat.unsqueeze(1)  # (B, 1, D)
 
-    def forward(self, img, obj_tensor, env_vec, tgt_ids, tgt_mask):
+    def forward(self, img, obj_tensor, env_vec, tgt_ids, tgt_mask=None):
         B = img.size(0)
 
         # ViT global features
         img_feat = self.encode_image(img)
         
-        # DINO object features
-        obj_feat = self.obj_encoder(obj_tensor)  # (B, N_obj, D)
+        # DINO object features (with full image for cropping)
+        obj_feat = self.obj_encoder(obj_tensor, full_images=img)  # (B, N_obj, D)
         
         # Environment features
         env_feat = self.env_encoder(env_vec)  # (B, 1, D)
@@ -137,6 +195,13 @@ class ExpansionNetV2_Multimodal(nn.Module):
 
         # Decoder
         tgt_embed = self.embedding(tgt_ids)
+        
+        # Create causal mask if not provided
+        if tgt_mask is None:
+            seq_len = tgt_ids.size(1)
+            # Upper triangular mask with -inf for future positions
+            tgt_mask = torch.triu(torch.ones(seq_len, seq_len, device=tgt_ids.device) * float('-inf'), diagonal=1)
+        
         dec_out = self.decoder(tgt_embed, encoder_memory, tgt_mask=tgt_mask)
 
         return self.output(dec_out)

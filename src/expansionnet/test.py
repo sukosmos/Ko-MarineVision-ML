@@ -1,9 +1,9 @@
 # src/test.py
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 import json
-import evaluate
+import sys
 
 from build_data import MultiModalCaptionDataset
 from model import ExpansionNetV2_Multimodal, load_tokenizer
@@ -45,40 +45,91 @@ def collate_fn(batch):
 
 
 def create_mask(size):
-    mask = torch.tril(torch.ones(size, size)).bool()
+    """
+    Causal mask for autoregressive generation.
+    Returns additive attention mask where 0.0 = attend, -inf = mask
+    """
+    mask = torch.triu(torch.ones(size, size) * float('-inf'), diagonal=1)
     return mask
 
 
 # ---------------------------------------------------------
 # Caption Autoregressive Generation
 # ---------------------------------------------------------
-def generate_caption(model, image, env, objects, tokenizer, max_len=64, device="cpu"):
+def generate_caption(model, image, env, objects, tokenizer, max_len=128, device="cpu", debug=False):
     model.eval()
     
     # 시작 토큰
     ids = torch.tensor([[tokenizer.cls_token_id]], device=device)
+    
+    if debug:
+        print(f"\n[DEBUG] Starting generation...")
+        print(f"[DEBUG] CLS token ID: {tokenizer.cls_token_id}")
+        print(f"[DEBUG] SEP token ID: {tokenizer.sep_token_id}")
+        print(f"[DEBUG] PAD token ID: {tokenizer.pad_token_id}")
+        print(f"[DEBUG] Initial ids shape: {ids.shape}")
+        print(f"[DEBUG] Device: {device}")
 
+    generated_tokens = []
     with torch.no_grad():
-        for _ in range(max_len):
-            tgt_mask = create_mask(ids.size(1)).to(device)
+        for step in range(max_len):
+            seq_len = ids.size(1)
+            # Mask 없이 is_causal=True로 자동 처리되도록 함
+            # tgt_mask = create_mask(seq_len).to(device)
 
-            # train.py와 동일한 형식: (B, C, H, W), (B, N_obj, 6), (B, 4), (B, seq_len)
-            logits = model(image, objects, env, ids, tgt_mask)
+            # Forward pass: (B=1, C, H, W), (B=1, N_obj, 6), (B=1, 4), (B=1, seq_len)
+            logits = model(image, objects, env, ids, tgt_mask=None)
 
-            next_token = logits[0, -1].argmax(dim=-1).item()
+            # logits shape: (B=1, seq_len, vocab_size)
+            # 마지막 위치의 로짓만 사용
+            next_token_logits = logits[0, -1, :]  # (vocab_size,)
+            next_token = next_token_logits.argmax(dim=-1).item()
+            
+            if debug and step < 10:
+                top5_tokens = next_token_logits.topk(5)
+                top5_indices = top5_tokens.indices.tolist()
+                top5_values = top5_tokens.values.tolist()
+                print(f"[DEBUG] Step {step}: next_token={next_token}")
+                print(f"        Top5 indices: {top5_indices}")
+                print(f"        Top5 values: {[f'{v:.2f}' for v in top5_values]}")
+                # 토큰을 텍스트로 디코드
+                try:
+                    decoded = tokenizer.decode([next_token])
+                    print(f"        Decoded: '{decoded}'")
+                except:
+                    print(f"        Decoded: (error)")
+            
+            generated_tokens.append(next_token)
+            
+            # 다음 토큰 추가
             ids = torch.cat([ids, torch.tensor([[next_token]], device=device)], dim=1)
 
-            if next_token == tokenizer.sep_token_id:
+            # 종료 조건
+            if next_token == tokenizer.sep_token_id or next_token == tokenizer.pad_token_id:
+                if debug:
+                    print(f"[DEBUG] Stopped at step {step}: token={next_token} ({'SEP' if next_token == tokenizer.sep_token_id else 'PAD'})")
                 break
 
-    caption = tokenizer.decode(ids.squeeze().tolist(), skip_special_tokens=True)
+    # 디코딩
+    generated_ids = ids.squeeze().tolist()
+    if debug:
+        print(f"[DEBUG] Generated token count: {len(generated_tokens)}")
+        print(f"[DEBUG] Generated tokens: {generated_tokens[:20]}...")
+        print(f"[DEBUG] Full ids (with CLS): {generated_ids[:20]}...")
+    
+    caption = tokenizer.decode(generated_ids, skip_special_tokens=True)
+    
+    if debug:
+        print(f"[DEBUG] Final caption: '{caption}'")
+        print(f"[DEBUG] Caption length: {len(caption)} chars")
+    
     return caption
 
 
 # ---------------------------------------------------------
 # Main Testing Function
 # ---------------------------------------------------------
-def test():
+def test(max_samples=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     tokenizer = load_tokenizer()
@@ -88,6 +139,12 @@ def test():
         root_dir="../../dataset/test",
         tokenizer=tokenizer
     )
+    
+    # 샘플 수 제한 (빠른 테스트용)
+    if max_samples is not None:
+        total = len(test_ds)
+        test_ds = Subset(test_ds, range(min(max_samples, total)))
+        print(f"[INFO] Limited to {len(test_ds)} samples (from {total})")
 
     loader = DataLoader(test_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
@@ -98,13 +155,21 @@ def test():
         num_subclasses=42
     ).to(device)
 
-    model.load_state_dict(torch.load("/data/CodeLLM/ML/outputs/expansionnet/expnetv2_multimodal.pth", map_location=device))
+    # Load checkpoint
+    checkpoint_path = "/data/CodeLLM/ML/outputs/expansionnet/expnetv2_earlystop.pth"
+    print(f"Loading model from: {checkpoint_path}")
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     predictions = []
     references = []
     results = []
 
-    for batch in tqdm(loader, desc="Testing"):
+    print(f"\n{'='*60}")
+    print(f"Testing on device: {device}")
+    print(f"Dataset size: {len(test_ds)}")
+    print(f"{'='*60}\n")
+
+    for idx, batch in enumerate(tqdm(loader, desc="Testing")):
         # train.py와 동일한 형식으로 데이터 로드
         img = batch["image"].to(device)      # (1, 3, 224, 224)
         env = batch["env"].to(device)        # (1, 4)
@@ -112,12 +177,29 @@ def test():
 
         gt_caption = tokenizer.decode(batch["caption_ids"][0].tolist(), skip_special_tokens=True)
 
+        # 첫 샘플에서는 상세 디버그
+        if idx == 0:
+            print(f"\n[DEBUG] First sample - checking inputs:")
+            print(f"  Image shape: {img.shape}")
+            print(f"  Env shape: {env.shape}, values: {env[0].tolist()}")
+            print(f"  Objects shape: {objs.shape}")
+            print(f"  GT caption length: {len(gt_caption)} chars")
+        
         pred_caption = generate_caption(
-            model, img, env, objs, tokenizer, device=device
+            model, img, env, objs, tokenizer, device=device, debug=(idx == 0)
         )
 
         predictions.append(pred_caption)
         references.append([gt_caption])  # 리스트로 감싸기 (여러 참조 답변 지원)
+
+        # 처음 3개 샘플 출력
+        if idx < 3:
+            print(f"\n--- Sample {idx+1} ---")
+            print(f"GT:   {gt_caption[:100]}...")
+            print(f"PRED: '{pred_caption[:100] if pred_caption else '(empty)'}...'")
+            if idx == 0 and not pred_caption:
+                print(f"[WARNING] First prediction is empty! Model may not be generating tokens.")
+
 
         results.append({
             "image": batch["img_path"][0],
@@ -135,52 +217,40 @@ def test():
     # ---------------------------------------------------------
     # Evaluation Metrics
     # ---------------------------------------------------------
-    print(f"\nTotal predictions: {len(predictions)}")
+    print(f"\n{'='*60}")
+    print("EVALUATION SUMMARY")
+    print(f"{'='*60}")
+    print(f"Total predictions: {len(predictions)}")
     print(f"Total references: {len(references)}")
+    
+    # 빈 예측 통계
+    empty_count = sum(1 for p in predictions if not p or len(p.strip()) == 0)
+    print(f"Empty predictions: {empty_count} ({empty_count/len(predictions)*100:.1f}%)")
+    print(f"Non-empty predictions: {len(predictions)-empty_count} ({(len(predictions)-empty_count)/len(predictions)*100:.1f}%)")
+    
     if len(predictions) > 0:
-        print(f"Sample prediction: {predictions[0][:50]}...")
-        print(f"Sample reference: {references[0]}")
+        print(f"\nFirst prediction: '{predictions[0][:80]}{'...' if len(predictions[0]) > 80 else ''}")
+        print(f"First reference: '{references[0][0][:80]}{'...' if len(references[0][0]) > 80 else ''}")
     
-    metrics = {}
+    metrics = {
+        "total_samples": len(predictions),
+        "empty_predictions": empty_count,
+        "non_empty_predictions": len(predictions) - empty_count,
+        "empty_ratio": empty_count / len(predictions) if len(predictions) > 0 else 0
+    }
     
-    try:
-        print("\nLoading BLEU...")
-        bleu = evaluate.load("bleu")
-        metrics["BLEU"] = bleu.compute(predictions=predictions, references=references)
-    except Exception as e:
-        print(f"BLEU failed: {e}")
-        import traceback
-        traceback.print_exc()
-        metrics["BLEU"] = None
-    
-    try:
-        print("Loading ROUGE...")
-        rouge = evaluate.load("rouge")
-        metrics["ROUGE"] = rouge.compute(predictions=predictions, references=references)
-    except Exception as e:
-        print(f"ROUGE failed: {e}")
-        metrics["ROUGE"] = None
-    
-    try:
-        print("Loading CIDEr...")
-        cider = evaluate.load("cider")
-        metrics["CIDEr"] = cider.compute(predictions=predictions, references=references)
-    except Exception as e:
-        print(f"CIDEr failed: {e}")
-        metrics["CIDEr"] = None
-    
-    try:
-        print("Loading METEOR...")
-        meteor = evaluate.load("meteor")
-        metrics["METEOR"] = meteor.compute(predictions=predictions, references=references)
-    except Exception as e:
-        print(f"METEOR failed: {e}")
-        metrics["METEOR"] = None
+    print("\n[INFO] Skipping online metrics (BLEU, ROUGE, etc.) for faster testing.")
+    print("[INFO] To compute full metrics, install evaluate library offline or use local implementation.")
 
     json.dump(metrics, open("metrics.json", "w"), indent=2, ensure_ascii=False)
-    print("Saved: metrics.json")
-    print(metrics)
+    print(f"\nSaved: metrics.json")
+    print(f"Saved: test_results.json")
 
 
 if __name__ == "__main__":
-    test()
+    # Usage: python test.py [max_samples]
+    # Example: python test.py 5  (test only 5 samples)
+    max_samples = int(sys.argv[1]) if len(sys.argv) > 1 else None
+    if max_samples:
+        print(f"[INFO] Running test with {max_samples} samples")
+    test(max_samples=max_samples)

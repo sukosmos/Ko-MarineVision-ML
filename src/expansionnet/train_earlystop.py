@@ -1,18 +1,9 @@
-# src/train.py
+# src/train_earlystop.py
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from model import ExpansionNetV2_Multimodal, load_tokenizer
 from build_data import MultiModalCaptionDataset
-
-
-def create_mask(size):
-    """
-    Causal mask for autoregressive generation.
-    Returns additive attention mask where 0.0 = attend, -inf = mask
-    """
-    mask = torch.triu(torch.ones(size, size) * float('-inf'), diagonal=1)
-    return mask
 
 
 def collate_fn(batch):
@@ -29,7 +20,6 @@ def collate_fn(batch):
     for item in batch:
         objs = item["objects"]
         if objs.size(0) < max_objs:
-            # 패딩: [0, 0, 0, 0, 0, 0]으로 채움
             padding = torch.zeros(max_objs - objs.size(0), 6)
             objs = torch.cat([objs, padding], dim=0)
         padded_objs.append(objs)
@@ -49,12 +39,14 @@ def train():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     print(f"\n{'='*60}")
-    print(f"TRAINING CONFIGURATION")
+    print(f"TRAINING WITH EARLY STOPPING")
     print(f"{'='*60}")
     print(f"Device: {device}")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"CUDA Version: {torch.version.cuda}")
+    print(f"Max Epochs: 5")
+    print(f"Early Stop Patience: 2")
     print(f"{'='*60}\n")
 
     tokenizer = load_tokenizer()
@@ -68,29 +60,31 @@ def train():
 
     model = ExpansionNetV2_Multimodal(
         vocab_size=tokenizer.vocab_size,
-        num_classes=4,   # 실제 클래스: 1~4 -> 0~3
-        num_subclasses=42  # 실제 서브클래스: 1~42 -> 0~41
+        num_classes=4,
+        num_subclasses=42
     ).to(device)
     
     # Verify model is on GPU
     if device == "cuda":
-        print(f"Model device check: {next(model.parameters()).device}")
+        print(f"Model device: {next(model.parameters()).device}")
         print(f"Model parameters: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
         print(f"GPU Memory allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB\n")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
     
-    # Learning rate scheduler for better generalization
+    # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=1, verbose=True
+        optimizer, mode='min', factor=0.5, patience=1
     )
 
+    # Early stopping parameters
     best_loss = float('inf')
     patience_counter = 0
-    early_stop_patience = 3
+    early_stop_patience = 2
+    max_epochs = 5
 
-    for epoch in range(10):
+    for epoch in range(max_epochs):
         model.train()
         loop = tqdm(train_loader, desc=f"Epoch {epoch}")
         
@@ -103,7 +97,6 @@ def train():
             env = batch["env"].to(device)
             objs = batch["objects"].to(device)
 
-            # is_causal=True로 자동 처리
             logits = model(img, objs, env, ids, tgt_mask=None)
 
             loss = criterion(
@@ -130,29 +123,29 @@ def train():
         if avg_loss < best_loss:
             best_loss = avg_loss
             patience_counter = 0
+            
             # Save best model
             from pathlib import Path
             output_dir = Path("../../outputs/expansionnet")
             output_dir.mkdir(parents=True, exist_ok=True)
-            best_path = output_dir / "expnetv2_best.pth"
-            torch.save(model.state_dict(), best_path)
-            print(f"  → Best model saved (loss: {best_loss:.4f})")
+            
+            model_path = output_dir / "expnetv2_earlystop.pth"
+            torch.save(model.state_dict(), model_path)
+            print(f"  ✓ Best model saved: {model_path} (loss: {best_loss:.4f})")
         else:
             patience_counter += 1
-            print(f"  → No improvement ({patience_counter}/{early_stop_patience})")
+            print(f"  ✗ No improvement (patience: {patience_counter}/{early_stop_patience})")
             
         if patience_counter >= early_stop_patience:
-            print(f"\nEarly stopping at epoch {epoch}")
+            print(f"\n{'='*60}")
+            print(f"Early stopping triggered at epoch {epoch}")
+            print(f"Best loss: {best_loss:.4f}")
+            print(f"{'='*60}\n")
             break
-
-    # 체크포인트 디렉토리 생성 및 모델 저장
-    from pathlib import Path
-    output_dir = Path("../../outputs/expansionnet")
-    output_dir.mkdir(parents=True, exist_ok=True)
     
-    model_path = output_dir / "expnetv2_multimodal.pth"
-    torch.save(model.state_dict(), model_path)
-    print(f"Model saved to {model_path}")
+    print(f"\nTraining completed!")
+    print(f"Final best loss: {best_loss:.4f}")
+    print(f"Model saved to: ../../outputs/expansionnet/expnetv2_earlystop.pth")
 
 
 if __name__ == "__main__":

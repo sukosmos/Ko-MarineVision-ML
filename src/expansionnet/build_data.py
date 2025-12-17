@@ -88,16 +88,26 @@ class MultiModalCaptionDataset(Dataset):
         ], dtype=torch.float32)
 
         # -----------------------------------------------------
-        # 5) Object list (bbox = w, h, x, y)
+        # 5) Object list (bbox = w, h, x, y를 normalized [0,1]로 변환)
         # -----------------------------------------------------
+        # 원본 이미지 크기 가져오기
+        img_pil = Image.open(img_path)
+        img_w, img_h = img_pil.size
+        
         objs = []
         for ann in data["annotations"]:
             w, h, x, y = ann["bounding_box"]
+            # Normalize bbox to [0, 1]
+            w_norm = w / img_w
+            h_norm = h / img_h
+            x_norm = x / img_w
+            y_norm = y / img_h
+            
             # PyTorch Embedding은 0-based 인덱싱을 사용하므로 1을 빼줌
             objs.append([
                 ann["class"] - 1,      # 1~4 -> 0~3
                 ann["sub_class"] - 1,  # 1~42 -> 0~41
-                w, h, x, y
+                w_norm, h_norm, x_norm, y_norm
             ])
 
         objects = torch.tensor(objs, dtype=torch.float32)

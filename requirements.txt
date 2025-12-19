@@ -1,0 +1,16 @@
+python 3.10.13
+
+torch==2.1.0
+torchvision==0.16.0
+mmengine
+mmcv==2.1.0
+mmdet==3.2.0
+transformers==4.36.2
+tokenizers
+opencv-python==4.8.1.78
+Pillow
+numpy
+tqdm
+evaluate
+fairscale
+nltk

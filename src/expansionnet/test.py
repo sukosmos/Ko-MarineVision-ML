@@ -156,7 +156,7 @@ def test(max_samples=None):
     ).to(device)
 
     # Load checkpoint
-    checkpoint_path = "/data/CodeLLM/ML/outputs/expansionnet/expnetv2_final.pth"
+    checkpoint_path = "/data/CodeLLM/ML/outputs/expansionnet/expnetv2_multimodal.pth"
     print(f"Loading model from: {checkpoint_path}")
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 

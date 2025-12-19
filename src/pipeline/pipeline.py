@@ -121,6 +121,9 @@ class CaptionPipeline:
             vit_logits["wave"].argmax(-1).item(),
         ], device=self.device).unsqueeze(0)  # (1, 4)
         
+        # Clamp environment values to valid range (safety check)
+        env_vec = env_vec.clamp(0, 7)  # max 7 for all env categories
+        
         if debug:
             print(f"ViT environment: {env_vec}")
         
@@ -130,6 +133,12 @@ class CaptionPipeline:
             objects = torch.zeros(1, 1, 6, device=self.device)
         else:
             objects = dino_objects.unsqueeze(0).to(self.device)  # (1, N_obj, 6)
+            
+            # CRITICAL: Clamp class IDs to valid range
+            # Model was trained with num_classes=4, num_subclasses=42
+            # DINO might return higher class IDs
+            objects[:, :, 0] = objects[:, :, 0].clamp(0, 3)  # class_id: [0, 3]
+            objects[:, :, 1] = objects[:, :, 1].clamp(0, 41)  # subclass_id: [0, 41]
         
         # 5. Generate caption with ExpansionNet
         caption = self._generate_caption(

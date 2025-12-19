@@ -18,7 +18,7 @@ pipe = CaptionPipeline(
     dino_ckpt=os.path.join(BASE_DIR, "outputs/dino/epoch_12.pth"),
     vit_ckpt=os.path.join(BASE_DIR, "outputs/vit/vit_env.pth"),   
     exp_ckpt=os.path.join(BASE_DIR, "outputs/expansionnet/expnetv2_final.pth"),
-    device="cpu"  # Use CPU for now
+    device="cuda"  # Use GPU
 )
 
 print(f"Running inference on: {test_img}")
